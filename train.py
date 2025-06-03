@@ -88,7 +88,7 @@ def main():
     # 4) Model, Loss, Optimizer
     # -------------------------------
     # Example: K=6, in_channels=3, hidden_dim=60, num_heads=10, rst_blocks=4 (per paper)
-    model = STRWP(K=6, in_channels=3, hidden_dim=60, num_heads=10, rst_blocks=4).to(device)
+    model = STRWP(input_time_steps=6, input_channels=3, embed_dim=60, num_heads=10, num_blocks=4).to(device)
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
