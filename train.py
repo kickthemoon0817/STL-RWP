@@ -51,7 +51,7 @@ def main():
     Y_test_path  = os.path.join(data_dir, "Y_test.npy")
 
     # Training hyperparameters
-    batch_size = 32
+    batch_size = 128
     num_epochs = 500
     learning_rate = 1e-3
     weight_decay = 1e-5  # small weight decay

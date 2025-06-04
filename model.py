@@ -1,52 +1,49 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as F 
 
 class SwinTransformerBlock(nn.Module):
     """
-    Single Swin Transformer block with:
-      - window-based multi-head self-attention (with optional shift),
-      - an MLP feed-forward,
-      - LayerNorm before each sub-layer,
-      - residual connections for both attention and MLP.
     Input: (B, C, H, W)
-    Output: (B, C, H, W) with C = dim.
+    Output: (B, C, H, W)
     """
-    def __init__(self, dim, num_heads, window_size, shift=False, mlp_ratio=4.0):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        window_size,
+        shift=False,
+        mlp_ratio=4.0,
+        attn_drop=0.,
+        proj_drop=0.
+    ):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         self.window_size = window_size
-        # If shift=True, we will shift by half-window_size along H and W:
+
         self.shift_size = window_size // 2 if shift else 0
 
-        # LayerNorm before QKV projection
         self.norm1 = nn.LayerNorm(dim)
-        # Combined QKV linear projection
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
-        # Output projection after attention
         self.proj = nn.Linear(dim, dim)
 
-        # LayerNorm before MLP
         self.norm2 = nn.LayerNorm(dim)
         hidden_dim = int(dim * mlp_ratio)
         self.fc1 = nn.Linear(dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, dim)
 
-        # Scaling factor for dot-product attention
         self.scale = (dim // num_heads) ** -0.5
 
     def forward(self, x):
         """
-        x: (B, C, H, W), where C=dim
+        x: (B, C, H, W)
         returns: (B, C, H, W)
         """
         B, C, H, W = x.shape
-        # Save input as residual
         shortcut = x
 
-        # ===== Self-Attention Sub-layer =====
-        # 1. LayerNorm on channels: convert (B, C, H, W) -> (B, H, W, C) to apply nn.LayerNorm(dim)
+        # convert (B, C, H, W) -> (B, H, W, C)
         x_ln = self.norm1(x.permute(0, 2, 3, 1))  # (B, H, W, C)
         # 2. If shifting windows, roll the feature map
         if self.shift_size > 0:
@@ -210,14 +207,16 @@ class STRWP(nn.Module):
     - Output: next frame with 3 channels on 40x40 -> (B, 3, 40, 40)
     - Rolls out autoregressively if needed.
     """
-    def __init__(self,
-                 input_time_steps=6,
-                 input_channels=3,
-                 embed_dim=60,
-                 num_heads=10,
-                 window_size=8,
-                 mlp_ratio=4.0,
-                 num_blocks=4):
+    def __init__(
+        self,
+        input_time_steps=6,
+        input_channels=3,
+        embed_dim=60,
+        num_heads=10,
+        window_size=8,
+        mlp_ratio=4.0,
+        num_blocks=4
+    ):
         super().__init__()
         self.input_time_steps = input_time_steps
         self.input_channels = input_channels
@@ -235,6 +234,7 @@ class STRWP(nn.Module):
             for _ in range(num_blocks)
         ])
         # Final convolution back to 3 channels
+        self.conv_3 = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1)
         self.conv_out = nn.Conv2d(embed_dim, input_channels, kernel_size=3, padding=1)
 
     def forward(self, x):
@@ -247,9 +247,12 @@ class STRWP(nn.Module):
         # Merge time and channel dims => (B, 6*3, 40, 40)
         x = x.view(B, T * C, H, W)
         x = self.conv_in(x)                 # (B, embed_dim, 40, 40)
+        residual_1 = x
         for block in self.transformer_blocks:
             x = block(x)                    # (B, embed_dim, 40, 40)
-        x = self.conv_out(x)                # (B, 3, 40, 40)
+        x = self.conv_3(x)                # (B, 3, 40, 40)
+        x = x + residual_1
+        x = self.conv_out(x)
         return x
 
     def roll_out(self, x, steps):
@@ -267,3 +270,20 @@ class STRWP(nn.Module):
             # Slide window: drop oldest, append predicted
             current_input = torch.cat([current_input[:, 1:], next_frame.unsqueeze(1)], dim=1)
         return torch.cat(preds, dim=1)  # (B, steps, 3, 40, 40)
+
+# device = "cuda" if torch.cuda.is_available() else "cpu"
+# model = STRWP(
+#     input_time_steps=6,
+#     input_channels=3,
+#     embed_dim=60,
+#     num_heads=10,
+#     window_size=8,
+#     mlp_ratio=4.0,
+#     num_blocks=4
+# ).to(device)
+
+# total_params = sum(p.numel() for p in model.parameters())
+# trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+# print(f"Total parameters: {total_params}")
+# print(f"Trainable parameters: {trainable_params}")

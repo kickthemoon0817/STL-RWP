@@ -1,84 +1,72 @@
-# main.py
-
-import pathlib
+import os
+import glob
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
 
-from model import STRWP, rolled_out_prediction
+from model import STRWP
 
-def prepare_input_sequence(u10n_arr, v10n_arr, swh_arr, K):
-    """
-    Given three numpy arrays of shape (T, H, W), extract the first K time‐steps
-    and stack them into a tensor of shape (1, K, 3, H, W) ready for the model.
-    """
-    # Ensure all arrays have the same shape
-    assert u10n_arr.shape == v10n_arr.shape == swh_arr.shape, \
-        "u10n_arr, v10n_arr, and swh_arr must all have shape (T, H, W)"
+
+class WaveDataset(Dataset):
+    def __init__(self, X_path, Y_path, device="cpu"):
+        """
+        X_path: path to “X_*.npy” with shape (N, K, 3, H, W)
+        Y_path: path to “Y_*.npy” with shape (N, 3, H, W)
+        """
+        self.X = np.load(X_path)  # dtype float32 or float64
+        self.Y = np.load(Y_path)
+        assert self.X.shape[0] == self.Y.shape[0], "Mismatched samples"
+
+        # Convert once to torch tensors
+        self.X_tensor = torch.from_numpy(self.X).float().to(device)  # (N, K, 3, H, W)
+        self.Y_tensor = torch.from_numpy(self.Y).float().to(device)  # (N, 3, H, W)
+
+    def __len__(self):
+        return self.X_tensor.shape[0]
+
+    def __getitem__(self, idx):
+        # Return: (input_seq, target_frame)
+        return self.X_tensor[idx], self.Y_tensor[idx]
     
-    T, H, W = u10n_arr.shape
-    assert T >= K, f"Need at least K={K} time steps, but got T={T}"
-
-    # Take the first K frames of each variable
-    u_window = u10n_arr[0:K]  # shape: (K, H, W)
-    v_window = v10n_arr[0:K]  # shape: (K, H, W)
-    swh_window = swh_arr[0:K] # shape: (K, H, W)
-
-    # Stack into (K, 3, H, W)
-    # Order: channel 0 = u10n, 1 = v10n, 2 = swh
-    stacked = np.stack([u_window, v_window, swh_window], axis=1)  
-    # Now stacked has shape (K, 3, H, W)
-
-    # Add a batch dimension → (1, K, 3, H, W)
-    input_seq = torch.from_numpy(stacked).float().unsqueeze(0)
-    return input_seq  # dtype=torch.float32
 
 def main():
-    # Path to your .npy files
-    data_path = pathlib.Path("./data")
-    u10n_arr = np.load(data_path / "u10n_array.npy")          # shape: (T, H, W)
-    v10n_arr = np.load(data_path / "v10n_array.npy")          # shape: (T, H, W)
-    swh_arr = np.load(data_path / "swh_interp_array.npy")     # shape: (T, H, W)
+    # -------------------------------
+    # 2) Configuration & Hyperparams
+    # -------------------------------
+    data_dir = "./data"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Hyperparameters
-    K = 6                # Number of input timesteps
-    rollout_steps = 6    # Number of steps to predict ahead
-    hidden_dim = 60      # Must match the STRWP definition
-    num_heads = 10       # Must match the STRWP definition
-    rst_blocks = 4       # Must match the STRWP definition
+    batch_size = 128
+    checkpoint_dir = "./checkpoints"
 
-    # Prepare a single‐batch input (1, K, 3, H, W)
-    input_seq = prepare_input_sequence(u10n_arr, v10n_arr, swh_arr, K)
+    X_test_path  = os.path.join(data_dir, "X_test.npy")
+    Y_test_path  = os.path.join(data_dir, "Y_test.npy")
 
-    # Instantiate the model (with the same defaults as in model.py)
-    model = STRWP(
-        K=K,
-        in_channels=3,
-        hidden_dim=hidden_dim,
-        num_heads=num_heads,
-        rst_blocks=rst_blocks
+    test_dataset  = WaveDataset(X_test_path,  Y_test_path, device)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False
     )
 
-    # If you have saved weights, load them here. Otherwise, this uses random init:
-    # model.load_state_dict(torch.load("path_to_saved_weights.pth"))
+    criterion = nn.MSELoss()
 
-    # Move model + data to GPU if available
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    input_seq = input_seq.to(device)
+    model = STRWP(input_time_steps=6, input_channels=3, embed_dim=60, num_heads=10, num_blocks=4).to(device)
 
-    # Run rolled‐out prediction
-    preds = rolled_out_prediction(model, input_seq, steps=rollout_steps)
-    # preds has shape (1, rollout_steps, 3, H, W)
+    checkpoint = torch.load(os.path.join(checkpoint_dir, "strwp_best_epoch27.pth"), map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
 
-    # Convert predictions back to numpy
-    preds_np = preds.squeeze(0).cpu().numpy()  
-    # Now preds_np has shape (rollout_steps, 3, H, W)
-
-    # Save each predicted frame into .npy files
-    for t in range(rollout_steps):
-        print("u10n:", preds_np[t, 0])
-        print("v10n:", preds_np[t, 1])
-        print("swh:", preds_np[t, 2])
+    model.eval()
+    test_loss_accum = 0.0
+    with torch.no_grad():
+        for X_batch, Y_batch in test_loader:
+            outputs = model(X_batch)
+            loss = criterion(outputs, Y_batch)
+            test_loss_accum += loss.item() * X_batch.size(0)
+    test_loss = test_loss_accum / len(test_dataset)
+    print(f"Test Loss (MSE): {test_loss:.6f}")
 
 if __name__ == "__main__":
     main()
